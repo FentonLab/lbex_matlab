@@ -1,0 +1,128 @@
+clear all;
+
+% Visualize sensor-space spectrogram from the data. 
+% This is not an integral step in the localization calculations and may
+% well be skipped entirely. 
+%
+% To be called after a runcrx2lrx or runPreProcess run
+%
+
+% Load from & Save to ...
+%
+cfg.load.dir = 'X:\Aquarids\code\loc2010';
+cfg.load.filename = 'hdm1_prep.lrx';
+% cfg.load.filename = 'N_R1.lrx';
+% cfg.load.filename = 'N_R1_prep.lrx';
+cfg.save.dir = cfg.load.dir ;
+[pathstr, name, ext, versn] = fileparts( cfg.load.filename ); 
+cfg.save.filename = [name '_ft.lrx'];
+
+fCutOff = [ 5 70 ];
+speedOfDisplay = 0.2; % seconds before next plot appears
+baseSubtract = 1; % Use average spectrum as baseline
+cfg.show = 1; % Show the power spectrogram plots
+
+% Load the crx preprocessed data into matlab session
+%
+load([ cfg.load.dir filesep cfg.load.filename ], '-mat')
+
+% Extract basic parameters
+Fs = ts.frequency; 
+nTrials = ts.trials;
+
+% Spectral Parameters
+% 
+% Specify tapers in the 3-form, [W T p] where W is the bandwidth (Hz), 
+% T is the duration of the data, in secs, and p is an integer such that  
+% 2TW-p tapers are used. Eg, if T=100 ms(millisecs)= 0.1s, W=5 Hz, 2TW=1
+%
+% To allow for further analysis in frequency domain ensure that the
+% frequency grid is the same for all trial sets
+
+W = 5; % Taper bandwidth in frequency domain. In Hertz, Hz, if Fs in Hz
+% moving win: units = secs, consistent with T in tapers = [W T p]
+movingwin = [400 25] / 1000; 
+T = movingwin(1); % to be consistent - don't change!! 
+p = 1;
+
+tapers = [W T p];
+% Don't remove this test
+%
+K  = floor(2*T*W - p); % as tested in getparams.m 
+if ~K
+    error( [mfilename, 'Number of tapers retained, K = 0']);
+else
+    disp( [mfilename, ' 2TW = ' num2str(2*T*W)]);
+    disp( [mfilename, ' TW -p = ' num2str(2*T*W - p)]);
+    disp( [mfilename, ' Number of tapers retained, K = ' num2str(K)]);
+end
+
+% Remaining parameters for spectral computations
+% Note: 
+% At this point fpass parameter inputs are best left unspecified so that
+% they default to entire range, [0,Fs/2]. This since at this point we don't
+% know which frequency band is of interest. 
+%
+params.pad = 1;
+params.tapers = tapers;
+params.Fs = Fs;
+
+for i = 1:nTrials
+    [Q,t,f] = mtTFgramc( ts.data{i}, movingwin, params );
+    power{i} = squeeze( mean(conj(Q).*Q,2) );  % channels x frequency x windows/time
+    % keep them trial dependent, hence unequal lengths
+    freqRange{i} = f;
+    timeRange{i} = t;    % same as # of window sliding steps
+end
+
+% Fix the time axis limits since trial lengths may vary
+% 
+tmax = 0; for i=1:nTrials, tmax = max( tmax, max(timeRange{i}) ); end
+
+% Max/min power
+%
+if ~baseSubtract
+    pmax = realmin; for i=1:nTrials, pmax = max( pmax, max(power{i}(:)) ); end
+    pmin = realmax; for i=1:nTrials, pmin = min( pmin, min(power{i}(:)) ); end
+else
+end
+
+% Use this value to set a fixed colormap
+% Allows for a consistent map for visual comparison
+%
+clims =[log10(pmin), log10(pmax)];
+
+
+if cfg.show
+    figure; pwFig = axes('Parent', gcf); set(gca,'YDir','reverse');
+    
+    for i = 1:nTrials
+        t = timeRange{i};
+        f = freqRange{i}; indf = find( f > fCutOff(1) & f < fCutOff(2)); f = f(indf);
+        avgS = zeros( length(f), size(power{i},1) ); % frequency x channels
+        if baseSubtract
+            for c = 1:size(power{i},1)
+                avg = squeeze(power{i}(c,indf,:)); % frequency x windows/time
+                avgS(:, c) = log10( mean( avg, 2) );  
+            end
+        end
+            
+        for c = 1:size(power{i},1)
+            q = squeeze( power{i}(c,indf,:) ); % tapers x frequency x windows/time
+            if ~baseSubtract
+                imagesc( [0,tmax], fCutOff, log10( q ),  'Parent', pwFig );
+                set(gca, 'CLim', clims); % Fix the color scale across trials & channels
+                axis xy; colorbar; 
+            else
+                imagesc( [0,tmax], fCutOff, log10( q ) - ...
+                    repmat(squeeze(avgS(:,c)), 1, length(t)), 'Parent', pwFig );
+                set(gca, 'CLim', clims); % Fix the color scale across trials & channels
+                axis xy; colorbar; 
+            end
+            title( ['Trial: ' num2str(i) ', Channel: ' ts.channel.labels{c} ' (#' num2str(c) ')'] );
+           pause(speedOfDisplay);
+        end
+    end
+end
+
+

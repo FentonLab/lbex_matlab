@@ -1,0 +1,167 @@
+function [ srcSpace ] = voxelizeSphere( srcSpace )
+%
+% Chronux:: LBEX - A Source Localization Toolbox 
+%
+% Usage:
+% [ srcSpace ] = voxelize3D( srcSpace )
+%
+% Purpose:
+% Given the radius & voxel size of sphere head model, generate the voxel
+% centorids. For use in EEG/MEG leadfield matrix calculations. All location
+% parameters must be specified in the head coordinate system. 
+%
+% Inputs: 
+% srcSpace.voxelSize = Size of voxel cube.
+% srcSpace.gridLimits(i, j) = [lower_limit, upper_limits]. i=1,2; j = 1,2,3 = x,y,z.
+%                    (Optional). If not specified these will be 
+%                    determined using the sphere radius (radii). Must be in
+%                    head coordinate system.
+% srcSpace.senLoc(i,j) = Array of E/MEG sensor positions. i=1,nSensors; j=1,2,3.
+%                        This is required only if *.grid not specified.
+%                        Must be in head coordinate system
+% srcSpace.radius = Radius (Radii) of the single (local) sphere head model
+% srcSpace.units = string, 'cm' or 'mm' 
+% srcSpace.origin = origin(s) of the single (local) sphere center. Must be
+%                   in head coordinate system.
+% srcSpace.plot = 0/1(optional; default=0=off) Display the centroid locations
+% srcSpace.display = 0/1 (optional; default=0=off) Output parameter value messages.
+%
+% Outputs:
+% srcSpace.grid( :, 3 ) = Cartesian coordinates of the voxel centroids of entire cube.
+% srcSpace.inside = Array containing indices of voxels within sphere(s) radius (radii).
+% srcSpace.outside = Array containing indices of voxels outside sphere(s) radius (radii).
+% srcSpace.nVoxels = Total number of voxels within or on the sphere. 
+%
+% Comments:
+% (1) If the srcSpace.radius is an array, it will be assumed that the user
+% desires a voxelization using local spheres.
+%
+% (2) To obtain the centroids of voxels within spheres:
+%       centroids = srcSpace.grid( srcSpace.inside, 3 );
+%
+rName = 'voxelizeSphere:: ';
+if ~isfield( srcSpace, 'plot' ), srcSpace.plot = 0;  end
+if ~isfield( srcSpace, 'display' ), srcSpace.display = 0;  end
+msg = checkVoxelizeSphere( srcSpace );
+if ~isempty( msg ), error( [ rName msg ] ); end
+
+%
+% Cube Generation
+%
+
+% If user specifies grid use it 
+% or else use sensor layout to determine the boundaries of the cube
+% if isfield( srcSpace, 'gridLimits' )
+%     xGrid = [ srcSpace.gridLimits(1,1) : srcSpace.voxelSize : srcSpace.gridLimits(2,1) ];
+%     yGrid = [ srcSpace.gridLimits(1,2) : srcSpace.voxelSize : srcSpace.gridLimits(2,2) ];
+%     zGrid = [ srcSpace.gridLimits(1,3) : srcSpace.voxelSize : srcSpace.gridLimits(2,3) ];
+% else
+%     xGrid = [ floor( min( srcSpace.senLoc(:,1) ) ) : srcSpace.voxelSize : ceil( max( srcSpace.senLoc(:,1) ) ) ];
+%     yGrid = [ floor( min( srcSpace.senLoc(:,2) ) ) : srcSpace.voxelSize : ceil( max( srcSpace.senLoc(:,2) ) ) ];
+%     zGrid = [ floor( min( srcSpace.senLoc(:,3) ) ) : srcSpace.voxelSize : ceil( max( srcSpace.senLoc(:,3) ) ) ];
+% end
+
+if isfield( srcSpace, 'gridLimits' )
+    xlim = srcSpace.gridLimits(:,1) ;
+    ylim = srcSpace.gridLimits(:,2) ;
+    zlim = srcSpace.gridLimits(:,3) ;
+else
+    xlim = [ floor( min( srcSpace.senLoc(:,1) ) ), ceil( max( srcSpace.senLoc(:,1) ) ) ];
+    ylim = [ floor( min( srcSpace.senLoc(:,2) ) ), ceil( max( srcSpace.senLoc(:,2) ) ) ];
+    zlim = [ floor( min( srcSpace.senLoc(:,3) ) ), ceil( max( srcSpace.senLoc(:,3) ) ) ];
+end
+
+% Directly work with centroids
+% Perhaps has advantage that it won't knock off voxels with vertices on the
+% edge of the sphere. 
+% Changed 31 Mar 2010
+fraction = 0.25; % between 0 & 0.5
+vs = srcSpace.voxelSize; fvs = fraction*vs;
+xGrid = [ xlim(1)+fvs : vs : xlim(2)-fvs ];
+yGrid = [ ylim(1)+fvs : vs : ylim(2)-fvs ];
+zGrid = [ zlim(1)+fvs : vs : zlim(2)-fvs ];
+
+%
+% Voxels in Sphere determination
+%
+
+nCubes = length( xGrid )*length( yGrid )*length( zGrid );
+x = zeros( nCubes, 1 ); y = x; z = x;
+inside = zeros( nCubes, 1 ); 
+for i = 1 : length( srcSpace.radius )
+    [x,y,z] = meshgrid( xGrid - srcSpace.origin( i,1 ), yGrid - srcSpace.origin( i,2 ), zGrid - srcSpace.origin( i,3 ) );
+    % Following to keep ordering consistent with ndgrid used in fieldtrip
+    %[y,x,z] = meshgrid( yGrid - srcSpace.origin( i,2 ), xGrid - srcSpace.origin( i,1 ), zGrid - srcSpace.origin( i,3 ) );
+    x = x(:); y = y(:); z = z(:);
+    inside( find( x.^2 + y.^2 + z.^2 <= srcSpace.radius(i)^2 ) ) = 1;
+end
+
+%
+% Output parameters
+%
+
+srcSpace.inside = find( inside ); % get non-zero elements
+srcSpace.outside = find( inside == 0 );
+% Generate the (x,y,z) triplets in 
+[x,y,z] = meshgrid( xGrid, yGrid, zGrid );
+% to keep ordering consistent with ndgrid used in fieldtrip
+%[y,x,z] = meshgrid( yGrid, xGrid, zGrid );  
+srcSpace.grid = [ x(:) y(:) z(:) ]; % create *.grid
+srcSpace.nVoxels = length( srcSpace.inside );
+if length( srcSpace.radius ) > 1
+    srcSpace.model = 'localSpheres';
+else
+    srcSpace.model = 'singleSphere'; 
+end
+
+%
+% On Screen Outputs
+%
+if srcSpace.display
+    spc = '   ';
+    disp( rName );
+    disp( [ spc 'Total Number of Voxels: ' num2str( srcSpace.nVoxels ) ] );
+    disp( [ spc 'Voxel Size: ' num2str( srcSpace.voxelSize ) ' ' srcSpace.units ] );
+    if length( srcSpace.radius ) == 1
+        disp( [ spc 'Model Used: Single sphere.'] );
+        disp( [ spc '  Sphere Radius   : ' num2str( srcSpace.radius ) ' ' srcSpace.units ] );
+        disp( [ spc '  Sphere Center At: ' num2str( srcSpace.origin ) ' ' srcSpace.units ] );
+    else
+        disp( [ spc 'Model Used: ' num2str(length( srcSpace.radius )) ' local spheres.'] );
+        disp( [ spc 'Warning....local spheres not completely implemented!!! '] );
+    end
+end
+
+%
+% Plot the inside voxel centroid cloud
+%
+if srcSpace.plot
+    c = srcSpace.grid( srcSpace.inside, : );
+    figure; plot3( c(:,1), c(:,2), c(:,3), 'b.' )
+    title( [ rName 'Centroid Locations'] ); axis equal;
+end
+
+
+%
+% Routine to check inputs for voxelizeSphere
+%
+function [ msg ] = checkVoxelizeSphere( srcSpace )
+
+msg = [];
+% Check for necessary fields
+x = fieldnames( srcSpace );
+xCmp = { 'voxelSize', 'radius', 'origin', 'units', 'plot', 'display' };
+for i = 1 : length( xCmp )
+    if isempty( strmatch( xCmp(i), x, 'exact') )
+        msg = 'srcSpace structure must have *.voxelSize, *.radius, *.origin, *.units fields.'; return;
+    end
+end
+
+if ~isfield( srcSpace, 'gridLimits' ) && ~isfield( srcSpace, 'senLoc' )
+    msg = 'If *.gridLimits not specified then *.senLoc (sensor locations) must be specified.'; return;
+end
+
+if ~isnumeric( srcSpace.voxelSize ) || ~isnumeric( srcSpace.radius ) || ~isnumeric( srcSpace.origin )   
+    msg = 'Fields *.voxelSize, *.radius, *.origin must be numeric.'; return;
+end
+

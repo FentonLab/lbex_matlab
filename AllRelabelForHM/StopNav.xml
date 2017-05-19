@@ -1,0 +1,14 @@
+<?xml version="1.0" ?>
+<ReLabelDetails ObjectId="48" NumChannels="1" Name="StopNav.crx" Path="C:\Documents and Settings\Andrew Goldfine\My Documents\EEGResearch\Normal1June8\ExportedAsCRX\StopNav.crx">
+   <chngLbl>
+      <ndx>
+         9
+      </ndx>
+      <orig>
+         Fpz
+      </orig>
+      <chng>
+         Ekg
+      </chng>
+   </chngLbl>
+</ReLabelDetails>

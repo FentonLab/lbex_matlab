@@ -1,0 +1,103 @@
+clear all;
+
+% Create a time-frequency matrix from the data by running FFT on the data.
+% This is NOT the same as spectrogram, since this does not evaluate the
+% power - it's plain Fourier transform of the data to be used eventually
+% for power localization. 
+%
+% To be called after a runcrx2lrx or runPreProcess run
+%
+
+% Load from & Save to ...
+%
+cfg.load.dir = 'X:\Aquarids\code\loc2010';
+% cfg.load.filename = 'hdm1_prep.lrx';
+cfg.load.filename = 'N_R1_prep.lrx';
+cfg.save.dir = cfg.load.dir ;
+[pathstr, name, ext, versn] = fileparts( cfg.load.filename ); 
+cfg.save.filename = [name '_ft.lrx'];
+cfg.show = 1; % Show the power spectrogram plots
+
+% Load the crx preprocessed data into matlab session
+%
+load([ cfg.load.dir filesep cfg.load.filename ], '-mat')
+
+% Extract basic parameters
+Fs = ts.frequency; 
+nTrials = ts.trials;
+
+% Spectral Parameters
+% 
+% Specify tapers in the 3-form, [W T p] where W is the bandwidth (Hz), 
+% T is the duration of the data, in secs, and p is an integer such that  
+% 2TW-p tapers are used. Eg, if T=100 ms(millisecs)= 0.1s, W=5 Hz, 2TW=1
+%
+% To allow for further analysis in frequency domain ensure that the
+% frequency grid is the same for all trial sets
+
+W = 5; % Taper bandwidth in frequency domain. In Hertz, Hz, if Fs in Hz
+% moving win: units = secs, consistent with T in tapers = [W T p]
+movingwin = [400 25] / 1000; 
+T = movingwin(1); % to be consistent - don't change!! 
+p = 1;
+
+tapers = [W T p];
+% Don't remove this test
+%
+K  = floor(2*T*W - p); % as tested in getparams.m 
+if ~K
+    error( [mfilename, 'Number of tapers retained, K = 0']);
+else
+    disp( [mfilename, ' 2TW = ' num2str(2*T*W)]);
+    disp( [mfilename, ' TW -p = ' num2str(2*T*W - p)]);
+    disp( [mfilename, ' Number of tapers retained, K = ' num2str(K)]);
+end
+
+% Remaining parameters for spectral computations
+% Note: 
+% At this point fpass parameter inputs are best left unspecified so that
+% they default to entire range, [0,Fs/2]. This since at this point we don't
+% know which frequency band is of interest. 
+%
+params.pad = 1;
+params.tapers = tapers;
+params.Fs = Fs;
+
+for i = 1:nTrials
+    [Q,t,f] = mtTFgramc( ts.data{i}, movingwin, params );
+    ts.TF.data{i} = Q;  % channels x tapers x frequency x windows/time
+    % keep them trial dependent, hence unequal lengths
+    ts.TF.freqRange{i} = f;
+    ts.TF.timeRange{i} = t;    % same as # of window sliding steps
+end
+
+baseSubtract = 0; 
+if cfg.show
+    fCutOff = [ 1 75;
+    figure; pwFig = axes('Parent', gcf); set(gca,'YDir','reverse');
+    for i = 1:nTrials
+        t = ts.TF.timeRange{i};
+        f = ts.TF.freqRange{i};
+        avgS = zeros( length(f), size(ts.TF.data{i},1) ); % frequency x channels
+        if baseSubtract
+            for c = 1:size(Q,1)
+                avg = squeeze(ts.TF.data{i}(c,:,:,:)); % tapers x frequency x windows/time
+                avgS(:, c) = log10( mean( squeeze( mean(conj(avg).*avg,1) ), 2) );  
+            end
+        end
+            
+        for c = 1:size(Q,1)
+            q = squeeze( ts.TF.data{i}(c,:,:,:) ); % tapers x frequency x windows/time
+            if ~baseSubtract
+                imagesc( t, f, log10( squeeze(mean(conj(q).*q,1)) ), 'Parent', pwFig );
+            else
+                imagesc( t, f, log10( squeeze(mean(conj(q).*q,1)) ) - ...
+                    repmat(squeeze(avgS(:,c)), 1, length(t)), 'Parent', pwFig );
+            end
+            title( ['Trial: ' num2str(i) ', Channel: ' ts.channel.labels{c} ' (#' num2str(c) ')'] );
+           pause(0.5);
+        end
+    end
+end
+
+

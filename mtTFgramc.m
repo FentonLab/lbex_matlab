@@ -1,0 +1,88 @@
+function [Q,t,f] = mtTFgramc(data,movingwin,params)
+% Multi-taper time-frequency transform of a continuous process
+%
+% Usage:
+% [Q,t,f] = mtTFgramc(data,movingwin,params)
+% Input: 
+% Note units have to be consistent. Thus, if movingwin is in seconds, Fs
+% has to be in Hz. see chronux.m for more information.
+%       data        (in form samples x channels) -- required
+%       movingwin         (in the form [window winstep] i.e length of moving
+%                                                 window and step size)
+%                                                 Note that units here have
+%                                                 to be consistent with
+%                                                 units of Fs - required
+%       params: structure with fields tapers, pad, Fs, fpass, err, trialave
+%       - optional
+%           tapers : precalculated tapers from dpss or in the one of the following
+%                    forms: 
+%                    (1) A numeric vector [TW K] where TW is the
+%                        time-bandwidth product and K is the number of
+%                        tapers to be used (less than or equal to
+%                        2TW-1). 
+%                    (2) A numeric vector [W T p] where W is the
+%                        bandwidth, T is the duration of the data and p 
+%                        is an integer such that 2TW-p tapers are used. In
+%                        this form there is no default i.e. to specify
+%                        the bandwidth, you have to specify T and p as
+%                        well. Note that the units of W and T have to be
+%                        consistent: if W is in Hz, T must be in seconds
+%                        and vice versa. Note that these units must also
+%                        be consistent with the units of params.Fs: W can
+%                        be in Hz if and only if params.Fs is in Hz.
+%                        The default is to use form 1 with TW=3 and K=5
+%                     Note that T has to be equal to movingwin(1).
+%
+%	        pad		    (padding factor for the FFT) - optional (can take values -1,0,1,2...). 
+%                    -1 corresponds to no padding, 0 corresponds to padding
+%                    to the next highest power of 2 etc.
+%			      	 e.g. For N = 500, if PAD = -1, we do not pad; if PAD = 0, we pad the FFT
+%			      	 to 512 points, if pad=1, we pad to 1024 points etc.
+%			      	 Defaults to 0.
+%           Fs   (sampling frequency) - optional. Default 1.
+%           fpass    (frequency band to be used in the calculation in the form
+%                                   [fmin fmax])- optional. 
+%                                   Default all frequencies between 0 and Fs/2
+% Output:
+%       Q       (Fourier transform in form time x frequency x channels 
+%       t       (times)
+%       f       (frequencies)
+
+if nargin < 2; error('Need data and window parameters'); end;
+if nargin < 3; params=[]; end;
+
+params.err=0; params.trialave=0;
+[tapers,pad,Fs,fpass,err,trialave,params]=getparams(params);
+if length(params.tapers)==3 & movingwin(1)~=params.tapers(2);
+    error('Duration of data in params.tapers is inconsistent with movingwin(1), modify params.tapers(2) to proceed')
+end
+
+data=change_row_to_column(data);
+[N,Ch]=size(data);
+Nwin=round(Fs*movingwin(1)); % number of samples in window
+Nstep=round(movingwin(2)*Fs); % number of samples to step through
+nfft=max(2^(nextpow2(Nwin)+pad),Nwin);
+f=getfgrid(Fs,nfft,fpass); Nf=length(f);
+tapers=dpsschk(tapers,Nwin,Fs); % check tapers
+
+winstart=1:Nstep:N-Nwin+1;
+nw=length(winstart); 
+
+J = zeros( (2*Nf-1), size(tapers,2), Ch ); % frequency x tapers x channels
+J = complex(J,J);
+%Q = zeros(Nf, size(tapers,2), Ch, nw); % frequency x tapers x channels x windows/time
+Q = zeros(Ch, size(tapers,2), Nf, nw); % channels x tapers x frequency x windows/time
+Q = complex(Q,Q); 
+
+% Caution: mfftc will return a 2-sided Fourier transform, need to cut it
+% down by half + 1.
+%
+for n=1:nw 
+   indx = winstart(n):winstart(n)+Nwin-1;
+   J = mtfftc( data(indx,:), tapers, nfft, Fs ); 
+   %Q(:,:,:,n) = J(1:Nf, :, :);  % frequency x tapers x channels x windows/time
+   Q(:,:,:,n) = permute( J(1:Nf, :, :), [3,2,1]);  % channels x tapers x frequency x windows/time
+end 
+%Q=squeeze(Q); % Don't squeeze in case nw = 1, ie entire time-series FFT'ed
+winmid=winstart+round(Nwin/2);
+t=winmid/Fs;

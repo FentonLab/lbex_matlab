@@ -1,0 +1,106 @@
+function [ config ] = ddConcentration( kernel, config, voxelCentroids )
+% Calculate the discrete-discrete concentration problem
+%
+% The routine doesn't really evaluate the conecentration eigenvectors but
+% is structured so that it dependent only on the ROI volume. I.e., the
+% output can then be used to directly set varying singular value spectrum
+% cut-off point and also the concentration eigenvalue threshold. 
+
+fprintf( 1, 'ddConcen:: \n' );
+if ~isfield( config, 'roiVolume' ), error( ['ddConcentration:: ROI Volume not specified...' ] ); end
+if ~isfield( config, 'filename' ), error( ['ddConcentration:: Storage filename not specified...' ] ); end
+if ~isfield( config, 'dir' ), config.dir = pwd; fprintf( 1, '   Directory not specified... set as: %s\n', config.dir ); end
+if ~isfield( config, 'show' ) 
+    config.show.eigenvalues = 0; 
+    config.show.msg = 0;
+else
+    if ~isfield( config.show, 'eigenvalues' ), config.show.eigenvalues = 0; end
+    if ~isfield( config.show, 'msg' ), config.show.msg = 0; end
+end
+
+% Open file for storage
+fid = 0; [ fid, message ] = fopen( [ config.dir filesep config.filename ], 'w'); if fid == -1, error( 'ddConcentration:: ', message ); end
+
+numberOfVoxels = size( voxelCentroids, 1 );
+nChannels = size( kernel, 1 );
+szMin = min( size(kernel) );
+
+% Evaluate parameters for voxel neighbour calcs
+voxelLengthScale = sqrt( min( sum( ( repmat( voxelCentroids( 1, : ), numberOfVoxels-1, 1 ) - voxelCentroids(2:end,:) ).^2, 2 ) ) );
+sourceSpaceVolume = numberOfVoxels * ( voxelLengthScale )^3;
+
+fprintf( 1, '   Voxels = %g, Voxel Lengthscale = %g, Source Space Volume = %g\n', numberOfVoxels, voxelLengthScale, sourceSpaceVolume );
+
+% For economy SVD, first transpose since M < N
+% Below: K = U * S * V^t = kernel
+% U = M x M, S = M x M, V = N x M
+[ V, S, U ] = svd( kernel', 0 );
+%sv = diag( S( 1:nChannels, 1:nChannels ) ); sMax = sv( 1 ); sv = sv / sv(1); clear S;
+%cutIndx = length( find( sv  > config.cutOff ) )
+%cutUS = U( :, 1 : cutIndx ) * diag( 1 ./ sv( 1 : cutIndx ) ) / sMax ;
+
+% At this stage evaluate the max-min singular values
+% Can be useful for later evaluation
+%config.singularValues = [ S( nChannels, nChannels ), S( 1, 1 ) ];
+config.svLeading = S( 1, 1 );
+%config.svRelMin = S( szMin, szMin )/S( 1, 1 );
+%fprintf( 1, '   Singular Values: Relative Min = %g, Leading = %g\n', S( szMin, szMin )/S( 1, 1 ), S( 1, 1 ) );
+config.svRelMin = S( nChannels, nChannels )/S( 1, 1 );
+fprintf( 1, '   Singular Values: Relative Min = %g, Leading = %g\n', S( nChannels, nChannels )/S( 1, 1 ), S( 1, 1 ) );
+
+fwrite( fid, numberOfVoxels, 'integer*4' );
+fwrite( fid, config.roiVolume, 'real*8' );
+fwrite( fid, nChannels, 'integer*4' );
+%fwrite( fid, diag( S( 1:szMin, 1:szMin ) ), 'real*8' );
+fwrite( fid, diag( S( 1:nChannels, 1:nChannels ) ), 'real*8' );
+fwrite( fid, size( U )', 'integer*4' );
+fwrite( fid, U, 'real*8' );
+
+if config.show.eigenvalues
+    sv = diag( S( 1:nChannels, 1:nChannels ) ); sMax = sv( 1 ); sv = sv / sv(1);
+    figure; plot( [ 1: length(sv) ], sv, 'k.' ); title( ['Singular Values of K_{\infty}'] ); drawnow;
+end
+
+fprintf( 1, '   Evaluating Concentration EVP... ' ); 
+tic;
+
+if config.show.eigenvalues, figure; evFig = axes('Parent', gcf); end
+
+%progressbar
+showPlot = 0; 
+for vx = numberOfVoxels : -1 : 1
+%for vx = 1 : 5 : numberOfVoxels
+    showDetails = 1;
+    [ roiColumns, roiVoxelIndices ]  = voxelNeighbours( config.roiVolume, vx, voxelCentroids, ...
+                    voxelLengthScale, sourceSpaceVolume, showDetails, showPlot );
+    showPlot = 0; % Turn off roi cluster plot
+
+    % M = nChannels ; N = 3*nVoxels
+    % Up = M x min(M, N), E = min(M, N) x N, Vp = N x N
+    [ Up, E, Vp ] = svd( V( roiColumns, 1:nChannels ), 0); 
+    
+    if config.show.eigenvalues
+        sv = diag( E( 1:nChannels, 1:nChannels ) ); sMax = sv( 1 ); sv = sv / sv(1);
+        
+        plot(evFig, [ 1: length(sv) ], sv, 'ro');
+        title( ['Sing Val C: ROI Centered at: ' num2str(vx)] );
+        drawnow;
+        pause(0.3);
+    end
+
+    fwrite( fid, vx, 'integer*4' );
+    fwrite( fid, length( roiColumns ), 'integer*4' );
+    fwrite( fid, roiColumns, 'integer*4' );
+    fwrite( fid, length( roiVoxelIndices ), 'integer*4' );
+    fwrite( fid, roiVoxelIndices, 'integer*4' );
+    fwrite( fid, min( size( E ) ), 'integer*4' );
+    fwrite( fid, diag( E ).^2, 'real*8' );
+    fwrite( fid, size( Vp )', 'integer*4' );
+    fwrite( fid, Vp, 'real*8' );
+    
+%    progressbar( (numberOfVoxels - vx + 1) / numberOfVoxels )
+end
+fprintf( 1, '   Done...%gs\n', toc );
+
+% Close the file
+status = fclose( fid ); if status == -1, error( 'ddConcentration:: Error closing file ...' ); end

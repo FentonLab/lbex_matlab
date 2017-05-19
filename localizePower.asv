@@ -1,0 +1,157 @@
+function [ power ] = localizePower( data, conc )
+
+% Function to localize power within source space.
+% Usage: [ power ] = localizePower( data, conc )
+%
+% Inputs: 
+%   data = complex matrix containing the real & imaginary parts of the
+%   Fourier transform (FT) of sensor time-series. Each column holds the FT
+%   of a channel (sensor). Should be dimensioned as 
+%
+%   data(c,t,f,w) = channels x tapers x frequency x windows/time
+%
+%   conc = structure holding information relevant to the concentration
+%   eigenvalue problem (CEV) solution & approximations. Before calling this
+%   routine, it is expected that runConc.m (or ddConcentration.m) has been
+%   run, and the CEV solution has bee stored in a file. This routine reads
+%   off this. In particular the following fields must be provided: 
+% 
+%   *.dir = directory containing cev file. If not provided, the working
+%   directory will be used. 
+%
+%   *.filename = filename of the cev file, ie filename.cev. The extension
+%   cev should also be supplied. 
+% 
+%   *.cutOff = (temporary). The concentration eigenvalue cutoff. 
+%
+%   *.threshold = (temporary). If the leading eigenvalue, lambda(1) is
+%   greater than this threshold, the voxel will be considered, or else set
+%   to realmin. 
+%
+% Outputs:
+%
+%   power = real matrix with localized estimate of the power emanating 
+%   from a voxel. power(i,j,k): i=1,frequencies, j=1,time-slice (windows),
+%   k=1,voxels.
+%
+%   
+
+rname = [mfilename ':: '];
+fprintf( 1, 'localizePower:: \n' ); 
+tic;
+if ~isfield( conc, 'dir' ), conc.dir = pwd; fprintf( 1, '   Directory for *.cev file not specified... set as: %s\n', conc.dir ); end
+if ~isfield( conc, 'filename' ), error( [rname 'Concentration .cev filename not specified...' ] ); end
+
+% Open frequency data 
+%
+if isreal(data), error([rname 'Data matrix should contain real & imaginary Fourier transformed data.']); end
+
+if length(size(data)) == 4,
+    [nChannels, nTapers, nFrequencies, nTimes ] = size(data);
+elseif length(size(data)) == 3,
+    [nChannels, nTapers, nFrequencies ] = size(data);
+    nTimes=1;
+else
+    error([rname 'Unrecognized data matrix structure.']);
+end
+fprintf( 1, '   Found: Freqs = %g, Tapers = %g, Channels = %g, Time-slices = %g \n', nFrequencies, nTapers, nChannels, nTimes );
+
+% Reshape data matrix for consistency further on, ie make 4D
+% 
+data = reshape( data, [nChannels, nTapers, nFrequencies, nTimes ] );
+
+% Open concentration data 
+fidC = 0; 
+[ fidC, message ] = fopen( [ conc.dir filesep conc.filename ], 'r'); 
+if fidC == -1, error( 'localizePower:: Error opening concentration data file...', message ); end
+
+nVoxels  = fread( fidC, 1, 'uint32' );
+roiVolume       = fread( fidC, 1, 'double' );
+nCh             = fread( fidC, 1, 'uint32' );
+S               = fread( fidC, nChannels, 'double' );
+uDim            = fread( fidC, 2, 'uint32' );  
+U               = fread( fidC, uDim', 'double' );
+
+fprintf( 1, '   Found: Voxels = %g, ROI Volume = %g, Channels = %g \n', nVoxels, roiVolume, nCh );
+
+if ~(nCh == nChannels), error([rname 'Number of channels within *.cev file inconsistent with data matrix.']); end
+
+% Criteria for retaining spatial tapers 
+%
+total = sum(S); 
+rsum = 0;
+while 
+    rsum = rsum + (S(i)/total);
+    
+end
+
+cutIndx = length( find( S  > S( 1 ) * conc.cutOff ) );
+cutUS = U( :, 1 : cutIndx ) * diag( 1 ./ S( 1 : cutIndx ) );
+
+
+% Original...
+% cutIndx = length( find( S  > S( 1 ) * conc.cutOff ) );
+% cutUS = U( :, 1 : cutIndx ) * diag( 1 ./ S( 1 : cutIndx ) );
+
+power = zeros( nFrequencies, nTimes, nVoxels ); 
+
+% Loop over each ROI centered around voxel, vx
+for vx = nVoxels : -1 : 1
+    v               = fread( fidC, 1, 'uint32' );
+    rcDim           = fread( fidC, 1, 'uint32' );
+    roiColumns      = fread( fidC, rcDim, 'uint32' );
+    rvDim           = fread( fidC, 1, 'uint32' );
+    roiVoxelIndices = fread( fidC, rvDim, 'uint32' );
+    cDim            = fread( fidC, 1, 'uint32' );
+    concEigenvalues = fread( fidC, cDim, 'double' );
+    vpDim           = fread( fidC, 2, 'uint32' );
+    Vp              = fread( fidC, vpDim', 'double' );
+
+    if concEigenvalues( 1 ) >= conc.threshold
+        mnIndx = min( nChannels, length( roiColumns ) );
+
+        mStar = 0; mStar = length( find( concEigenvalues >= conc.threshold ) );
+%         concVectors = cutUS * Vp( 1:cutIndx, 1:mnIndx ) ;
+        concVectors = cutUS * Vp( 1:cutIndx, 1:mStar ) ;
+        cV = concVectors'; % mStar x nChannels
+        cE = repmat( concEigenvalues( 1:mStar ), 1, nTapers ); % 
+
+        %if vx==nVoxels, figure; plot( [ 1: length(concEigenvalues)], concEigenvalues, 'k.' ); title( ['Conc Values '] ); drawnow; end
+        %if vx==nVoxels, figure; imagesc( concVectors' * kernel(:,roiColumns) ); colorbar( 'vert' ); drawnow; end
+        %if vx==nVoxels, figure; imagesc( concVectors' * kernel(:,roiColumns) * kernel(:,roiColumns)' * concVectors ); colorbar( 'vert' ); drawnow; end
+        %if vx==nVoxels, figure; imagesc( concVectors' * kernel * kernel' * concVectors ); colorbar( 'vert' ); drawnow; end
+        %if vx==nVoxels, figure; imagesc( V( roiColumns, : )'*V( roiColumns, : ) ); colorbar('vert'); title( ['V^t * V'] ); drawnow; end
+
+        
+        % Estimate power at voxel
+        for nt = 1:nTimes
+            for nf = 1 : nFrequencies
+                % taperedData =  mStar x nTapers = (mStar x nChannels) x (nChannels, nTapers)
+                taperedData = cV * squeeze( data( :, :, nf, nt ) ) ;
+                
+%                 size(cV)
+%                 size(squeeze( data( :, :, nf, nt ) ))
+%                 size(taperedData )
+%                 size(cE)
+%                 size( taperedData .* conj( taperedData )) 
+                
+                % Current power estimate from voxel only
+                power( nf, nt, vx ) = sum( sum( cE .* ( taperedData .* conj( taperedData ) ) ) ) / nTapers;
+            end
+        end
+
+    else
+
+        leak =  10*log10( 1 - concEigenvalues(1) ) ;
+        fprintf( 1, '   @ ROI on voxel = %g, leakage = %g, lambda(1) = %g \n', vx, leak, concEigenvalues(1));
+        plot( [ 1: length(concEigenvalues)], concEigenvalues, 'k.' ); title( ['Conc Values '] ); drawnow; 
+        power( :, :, vx ) = reshape( repmat( realmin, [ nFrequencies, nTimes ] ), [ nFrequencies, nTimes, 1 ] );
+
+    end
+
+end     % End of ROI-voxel loop
+
+% status = fclose( fidF ); if status == -1, error( 'localizePower:: Error closing file ...' ); end
+status = fclose( fidC ); if status == -1, error( 'localizePower:: Error closing file ...' ); end
+
+fprintf( 1, '   Done...%gs\n', toc );

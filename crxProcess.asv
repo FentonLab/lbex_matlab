@@ -1,0 +1,394 @@
+function ts = crxProcess( config )
+% Non-analytic preprocessing of acquisition data 
+% (1) Load the data into structures suitable for localization 
+% (2) Load the channel relabelling xml file & relabel
+% (3) Remove non-neurological channels, eg EKG, EMG, EOG, etc 
+% (4) Remove any user-specified bad channels, eg with drift or noticeable artifacts etc 
+% (5) Add on the reference channel (and get it's position too)
+% (6a) Match the current data labels with the 10-20 standard labels, get the
+%     electrode location 
+% (6b) Check whether coordinate system for location specification is the
+%      same (consistent) with voxelizeSphere.m, or else leadfield evaluation
+%      will be incorrect. 
+% (6c) Group channels based on established brain regions, get 
+%      corresponding indices
+% (7) Save the processed data to a mat file
+%
+% See runcrx2lrx file for inputs
+% See output ts structure 
+%
+
+rname = [mfilename ':: ']; 
+fprintf( 1, [rname '\n'] ); 
+
+% Check input data 
+%
+config = check_crxProcess( rname, config );
+
+% (1) Load the data
+%
+snip = load([ config.data.dir filesep config.data.filename ], '-mat');
+nSnips = snip.Info.Count;
+if ~nSnips, error( [rname 'Crx file has no snippets...' ] ); end
+
+% Transfer data onto structures more intuitive and directly useful for
+% localization. 
+
+ts.trials = nSnips; 
+
+channel.total = snip.Snippet_1.Data.ChannelsRead;
+channel.labels = upper( snip.Snippet_1.Data.sensor.labels );   % cell 
+channel.indices = snip.Snippet_1.Data.sensor.indices; % real array
+
+ts.frequency = snip.Snippet_1.Hdr.Common.Fs;    % hertz
+
+ts.data = cell(1,ts.trials);
+for i=1:ts.trials
+    s = ['snip.Snippet_' int2str(i) '.Data.modData'];
+    ts.data{i} = cell2mat( eval(s) );   % samples x channels
+end
+%plot(ts.data{1}(:,:))
+
+% (2)Load the user provided channel relabelling xml file, and relabel
+%
+% Note: 
+% usrlabels.original(1) returns a cell type
+% usrlabels.original{1} returns a char type
+% Holds true for channel.labels, usrlabels.channelNumbers and usrlabels.new too.
+
+relabeled = {}; 
+if config.relabel.do
+    usrLabels = lmx( config.relabel ); 
+    
+    % It is possible that the user may apply a relabeling which might
+    % result in duplication of channel labels. Check and warn the user that
+    % those channels will be skipped 
+    
+    % If no conflict, having warned the user, continue with relabeling 
+    %
+    for i=1:length(usrLabels.new)
+        % First check whether the input data channel list has labels which
+        % could be relabelled.
+        indx1 = strmatch(usrLabels.original{i}, channel.labels, 'exact' );
+        if indx1 
+            % Next check whether the new label being applied exists in the
+            % input data channel list. If so, we have a case of duplication
+            % of channels, and we should skip that relabelling
+            indx2 = strmatch( usrLabels.new{i}, channel.labels, 'exact' );
+            if indx2
+                msg = '  Skipped-> relabel an existing standard label, %s @%g with %s->%s @%s.\n';
+                fprintf(1, msg, channel.labels{indx2}, indx2, usrLabels.original{i}, usrLabels.new{i}, usrLabels.channelNumbers{i} );
+            else
+                if config.relabel.debug
+                    msg = '   Relabeling non-standard channel, %s @%g --> %s\n';
+                    fprintf(1, msg, channel.labels{indx1}, indx1, usrLabels.new{i} );
+                end
+                relabeled = [ relabeled [channel.labels{indx1} '->' usrLabels.new{i} ] ]; % cell content concatenation 
+                channel.labels(indx1) = usrLabels.new(i); % cell to cell
+            end
+        end
+    end
+end
+channel.relabeled = relabeled;
+
+
+% (3) Remove non-neurological channels, eg EKG, EMG, EOG, etc 
+% (4) Remove any other channels, eg with drift or noticeable artifacts etc 
+
+% Default list of channels not to be used during localization
+channel.removed = {}; 
+remove = [config.rmChannel.nonneuro config.rmChannel.other];
+rmlist = [];
+if ~isempty(remove)
+    for i=1:length(remove)
+        ind = strmatch( upper(remove{i}), channel.labels, 'exact' );
+        if ind
+            rmlist = [rmlist ind];
+            if config.rmChannel.debug
+                msg = '   Removed channel: %s @%g \n';
+                fprintf(1, msg, channel.labels{ind}, ind);
+            end
+        end
+    end
+    channel.removed = channel.labels(rmlist); 
+
+    % Update data structures by deletion
+    %
+    if ~isempty( rmlist )
+        for i=1:ts.trials
+            ts.data{i}(:,rmlist) = [];   % samples x channels
+        end
+
+        channel.total = channel.total - length(rmlist);
+        channel.labels( rmlist ) = [];   % cell deletion
+        channel.indices( rmlist ) = []; % real array deletion
+    end
+end
+
+% (6a) Match the current data labels with the 10-20 standard labels, get the
+%     electrode location 
+%
+% What coordinate system are the sensor locations reported in? 
+% -- Sphere of radius 0.1 meters
+% -- They are Cartesian, (x,y,z)
+% -- The +z axes passes thru the top of the head, channel Cz=(0,0,0.1)
+% -- The +x axes passes thru extreme right channel T10=(0.0865,0,-0.05)
+% -- The +y axes passes thru nose-front channel FPz=(0,0.1,-0.0021)
+% Therefore in summary, +x towards right ear, +y towards nose, +z towards
+% head top. 
+
+stdElectrode = standardEEGConfiguration( config.stdlabel );
+
+location = zeros(length(channel.labels),3);
+count=0;
+for i=1:length(channel.labels)
+    ind = strmatch(channel.labels{i}, stdElectrode.labels, 'exact' );
+    if ind
+        location(i,:) = stdElectrode.coords(ind,:);
+        count = count + 1; 
+        if config.stdlabel.debug
+            msg = '   Found standard label, %s @%g location set to [%g,%g,%g]\n';
+            fprintf(1, msg, channel.labels{i}, i, location(i,1), location(i,2), location(i,3) ); 
+        end
+    else
+        fprintf(1, 'No standard channel match found %s . Location set to [0,0,0]\n', channel.labels{i} ); 
+    end
+end
+
+if config.stdlabel.debug
+    msg = '   Original Channel Total = %g , New Standard Channel Total = %g\n';
+    fprintf(1, msg, length(channel.labels), count );
+end
+
+if ~(length(channel.labels) == count)
+    msg = ' Warning: Standard locations for all channels not found! \n';
+    fprintf(1, msg );
+end
+
+% Get the fiducial points such as L, R, N, V - to be made robust 
+% L and R represent the left and right pre-auricular points, 
+% N represents the nasion, and V represents the vertex.
+% 
+% Note: the following fiducial points are for a standard head, DO NOT USE
+% if the channel locations were provided using a digitizer such as the
+% Polhemus system. If this is the case, need to implement the fiducial
+% calculations and then define a coordinate system and re-express the
+% entire channel location using the new coordinate system. See email on the
+% subject. 
+%
+% I believe these are also labelled as: LPA, RPA, Nz, and Iz (Iz ->R unclear) 
+% Each of these points is 22.5 deg below the equator (if Cz is North pole)
+% hence, the z coord for each is -sin(22.5)
+% 
+% On a standard head of radius = 0.1 meters, the Cartesian coords are: 
+% Nz = (0, 0.0913, -0.0407)
+% Iz = (0, -0.0913, -0.0407)
+% LPA = T9 = (-0.0865, 0, -0.05)
+% RPA = T10 = (0.0865, 0, -0.05)
+%
+ts.fiducials.labels = {'LPA', 'RPA', 'Nz', 'Iz'};
+ts.fiducials.location = [-0.0865, 0, -0.05; 0.0865, 0, -0.05; 0, 0.0913, -0.0407; 0, -0.0913, -0.0407];
+ts.fiducials.coordsystem = 'cartesian';
+ts.fiducials.units = 'meters';
+
+% Inter-subject normalization -- to be implemented -- see fiducial email notes 
+% First need to co-register the various subject coordinate systems
+% Next normalize the channel locations
+% Follow up averaging the channel location for each subject, ie for a given
+% standard label, average the channel location across subjects.
+% More subtle steps can also be taken.. 
+
+% (6b) Check whether coordinate system for location specification is the
+%      same (consistent) with voxelizeSphere.m, or else leadfield evaluation
+%      will be incorrect. 
+
+% --> This won't matter since voxelizeSphere.m will utilize sensor coord
+% system, ie set head coordinates based on sensor system
+
+% (6c) Group channels based on established brain regions, get 
+%      corresponding indices
+%
+% Standard convention: 
+% -- left numbered odd, right numbered even; midline start with smallest 
+% numbers, and the numbering increases sideways
+% -- Center (midline) appended with z. z i supposed to be zero '0', but to
+% avoid confusion with "O" (for orange), is designated z. 
+% -- labels indicate the cortical lobe above which the electrode sits
+% -- two letters or more indicate intermediate locations
+channel.group.names = {'frontal pole', 'frontal', 'central', 'temporal', 'parietal', 'occipital', ...
+    'anterior-frontal', 'frontal-central', 'frontal-temporal', 'central-parietal', 'temporal-parietal', 'parietal-occipital'  };
+channel.group.filter = {'FP','F', 'C', 'T', 'P', 'O', 'AF', 'FC', 'FT', 'CP', 'TP', 'PO' };
+channel.group.filter = upper(channel.group.filter);
+
+% for i=1:length(channel.group.filter)
+%     % ind returns indices matched from channel.labels
+%     ind = strmatch(channel.group.filter{i}, channel.labels); % no exact match here
+%     channel.group.labels{i} = {};
+%     channel.group.indices{i} = [];
+%     if ind
+%         channel.group.labels{i} = { channel.labels{ind} };
+%         channel.group.indices{i} = ind;
+%         if config.stdlabel.debug
+%             msg = '   Found %g channels for group, %s \n';
+%             fprintf(1, msg, length(ind), channel.group.names{i} ); 
+%         end
+%     else
+%         fprintf(1, '  No standard channel match found for group %s.\n', [channel.group.names{i} ' ' channel.group.filter{i}] ); 
+%     end
+% end
+
+for i=1:length(channel.group.filter)
+    % ind returns indices matched from channel.labels
+    ind = strmatch(channel.group.filter{i}, channel.labels); % no exact match here
+    % Having determined the matches check for left or right hemispheres
+    %
+    channel.group.labels.left{i} = {}; channel.group.indices.left{i} = [];
+    channel.group.labels.right{i} = {}; channel.group.indices.right{i} = [];
+    channel.group.labels.center{i} = {}; channel.group.indices.center{i} = [];
+    if ind
+        lbl ={};
+        for j=1:length(ind)
+            x = char( channel.labels{ind(j)} ); % convert each to char array
+            if strmatch( x(1,end:end), { '1', '3', '5', '7', '9' }
+        end
+        indc = strmatch( { channel.labels{ind} };
+        channel.group.indices{i} = ind;
+        if config.stdlabel.debug
+            msg = '   Found %g channels for group, %s \n';
+            fprintf(1, msg, length(ind), channel.group.names{i} ); 
+        end
+    else
+        fprintf(1, '  No standard channel match found for group %s.\n', [channel.group.names{i} ' ' channel.group.filter{i}] ); 
+    end
+end
+
+% Transfer data to channel structure
+%
+channel.location = location; 
+channel.system.coordsystem = stdElectrode.coordsystem;
+channel.system.units = stdElectrode.units;
+channel.system.dir = stdElectrode.dir;
+channel.system.filename = stdElectrode.filename;
+
+% (5) Add on the reference channel (and get it's position too)
+%
+channel.reference.label = upper( config.addReference.channel ); 
+channel.reference.location = [];
+if ~strcmpi( channel.reference.label, 'AVG' )
+    ind = strmatch( channel.reference.label, stdElectrode.labels, 'exact' );
+    if ind
+        channel.reference.location = stdElectrode.coords(ind,:);
+    else
+        msg = ' No standard label for input reference-channel can be found...location set to [].\n';
+        fprintf(1, msg );
+    end
+end
+
+% Transfer data to ts structure
+%
+ts.channel = channel; 
+ts.date = datestr(clock);
+%ts.config = config;
+
+% Display basic time-series & sensor distribution
+if config.show, sensorDistribution( location ); end
+if config.show
+    for i=1:ts.trials
+        figure;
+        plot( [1:size(ts.data{i},1)]/ts.frequency, ts.data{i}(:,:) );
+        title( ['Snippet ' num2str(i) ' of ' num2str(ts.trials)] );
+    end
+end
+
+% (7) Save the processed data to a mat file
+%
+if config.save.do
+    save([ config.save.dir filesep config.save.filename ], 'ts');
+end
+
+% Check data inputs
+function config = check_crxProcess( rname, config )
+
+if ~isfield( config, 'data' ) 
+    error( [rname ' Input config.data.* not specified...' ] ); 
+else
+    if ~isfield( config.data, 'filename' ), error( [rname ' Input config.data.filename not specified...' ] ); end
+    if ~isfield( config.data, 'dir' )
+        config.data.dir = pwd;
+        fprintf( 1, ' Data file directory not specified... set as: %s\n', config.data.dir );
+    end
+    if ~isfield( config.data, 'debug' ), config.data.debug=0; end
+end
+
+if ~isfield( config, 'relabel' ) 
+    %warning( [rname ' Input config.relabel.* not specified...non-standard channels will not be used.' ] ); 
+    msg = ' Input config.relabel.* not specified...non-standard channels will not be used.\n';
+    fprintf( 1, msg ); 
+    config.relabel.do = 0;
+else
+    if ~isfield( config.relabel, 'do' ), config.relabel.do = 0; end
+    if config.relabel.do
+        if ~isfield( config.relabel, 'filename' ), error( [rname ' Input config.relabel.filename not specified...' ] ); end
+        if ~isfield( config.relabel, 'dir' )
+            config.relabel.dir = pwd;
+            fprintf( 1, ' Relabel XML file directory not specified... set as: %s\n', config.relabel.dir );
+        end
+        if ~isfield( config.relabel, 'debug' ), config.relabel.debug=0; end
+    end
+end
+
+if ~isfield( config, 'stdlabel' ) 
+    error( [rname ' Input config.stdlabel.* not specified...electrode positions cannot be obtained.' ] ); 
+else
+    if ~isfield( config.stdlabel, 'filename' ), error( [rname ' Input config.stdlabel.filename not specified...' ] ); end
+    if ~isfield( config.stdlabel, 'dir' )
+        config.stdlabel.dir = pwd; 
+        fprintf( 1, ' Standard file directory not specified... set as: %s\n', config.stdlabel.dir ); 
+    end
+    if ~isfield( config.stdlabel, 'debug' ), config.stdlabel.debug=0; end
+end
+
+if ~isfield( config, 'save' ) 
+    config.save.do = 0;
+else
+    if ~isfield( config.save, 'filename' ), error( [rname ' Input config.save.filename not specified...' ] ); end
+    if ~isfield( config.save, 'dir' )
+        config.save.dir = pwd; 
+        fprintf( 1, ' Directory for saving data not specified... set as: %s\n', config.save.dir ); 
+    end
+    if ~isfield( config.save, 'do' ), config.save.do = 1; end
+end
+
+if ~isfield( config, 'show' ), config.show = 0; end
+
+% If there is no rmChannel or noneuro field, then apply defaults
+% Default list of channels not to be used during localization
+default1 = { 'EMGREF', 'EMG', 'EMGp', 'EMGd' 'EKG', 'ECG', 'EOG' }; 
+default2 = {'REF'};
+if ~isfield( config, 'rmChannel' ) 
+    msg = ' Input config.rmChannel.* not specified...default non-neurological channels will be removed.\n';
+    fprintf( 1, msg ); 
+    config.rmChannel.nonneuro = default1; 
+    config.rmChannel.other = default2; 
+else
+    if ~isfield( config.rmChannel, 'nonneuro' )
+        config.rmChannel.nonneuro = default1;
+        msg = ' Input config.rmChannel.nonneuro not specified...default non-neurological channels will be removed.\n';
+        fprintf( 1, msg );
+    end
+    if ~isfield( config.rmChannel, 'other' )
+        config.rmChannel.other = default2; 
+    end
+    if ~isfield( config.rmChannel, 'debug' ), config.rmChannel.debug=0; end
+end
+
+% Set to empty cell, {}, or to {'AVG'} for average referencing
+%
+if ~isfield( config, 'addReference' ) || ~isfield( config.addReference, 'channel' ) ...
+        || isempty( config.addReference ) || isempty( config.addReference.channel ) 
+    config.addReference.channel = {'AVG'};
+    msg = ' Referencing set by default to average.\n';
+    fprintf( 1, msg );
+end
+
+

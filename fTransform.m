@@ -1,0 +1,120 @@
+function [ config ] = fTransform( data, config )
+
+rname = [mfilename ':: ']; 
+fprintf( 1, [rname '\n'] ); 
+
+if ~isfield( config, 'dataFile' ), error( ['  Input config.dataFile not specified...' ] ); end
+if ~isfield( config, 'filename' ), error( ['  Output config.filename not specified...' ] ); end
+if ~( isfield( config, 'fpass' ) && isfield( config, 'tapers' ) ), error( ['  Spectral parameter list missing...' ] ); end
+if ~isfield( config, 'dir' ), config.dir = pwd; fprintf( 1, '   Directory not specified... set as: %s\n', config.dir ); end
+
+if ~isfield( data, 'trial' ), error( ['  Input data.trial field not specified...' ] ); end
+if ~isfield( data.trial, 'indices' ), error( ['  Input data.trial.indices field not specified...' ] ); end
+if ~isfield( data, 'timeSeries' ), error( ['  Input data.timeSeries field not specified...' ] ); end
+if ~isfield( data, 'samplingRate' ), error( [' Sampling rate data.samplingRate field not specified...' ] ); end
+
+% Open file for storage
+fid = 0; [ fid, message ] = fopen( [ config.dir filesep config.filename ], 'w'); if fid == -1, error( message ); end
+
+% data.timeSeries{ trial } = numberOfSamples x numberOfChannels
+nChannels = size( data.timeSeries{ 1 }, 2 );
+nTrials = length( data.timeSeries );
+
+pad = config.pad;
+% Find max time-sample length
+tMax = -1; for tr = 1 : nTrials, tMax = max( tMax, size( data.timeSeries{ tr }, 1 ) ); end
+maxPow = nextpow2( tMax ) + pad;
+% Calculate pads so that final padded lengths of all series the same
+for tr = 1 : nTrials, dataPad(tr) = maxPow - nextpow2( size( data.timeSeries{ tr }, 1 ) ); end
+
+fSize = 2^( nextpow2( size( data.timeSeries{1}, 1 ) ) + dataPad( 1 ) );
+[f,findx] = getfgrid( data.samplingRate, fSize, config.fpass); 
+fSize = length( f );
+
+% Don't remove...needed by mtftc.m
+config.Fs = data.samplingRate;
+
+% Remove or replace someday...
+fData = complex( zeros( fSize, config.tapers( 2 ), nChannels ) );
+
+fprintf( 1, '   Evaluating FFT: \n' ); 
+fprintf( 1, '       Parameters: Tapers = %g, Pad = %g, Trials = %g \n', config.tapers( 2 ), pad, nTrials );
+fprintf( 1, '       Writing to: %s\n', config.filename ); 
+tic;
+
+fwrite( fid, nTrials, 'uint32' );
+fwrite( fid, [ fSize, config.tapers( 2 ), nChannels ], 'uint32' );
+progressbar
+% fData = frequency x tapers x channels
+for tr = 1 : nTrials
+    config.pad = dataPad( tr );
+    [ fData, f ] = mtftc( detrend( squeeze( data.timeSeries{ tr } ) ), config ); 
+    fwrite( fid, data.trial.indices( tr ), 'uint32' );    % Actual (original) trial index
+    fwrite( fid, real( fData ), 'real*8' );
+    fwrite( fid, imag( fData ), 'real*8' );
+    progressbar( tr / nTrials )
+end
+%fwrite( fid, length( f ), 'integer*4' );
+fwrite( fid, f, 'real*8' );
+
+fprintf( 1, '   Done...%gs\n', toc );
+% Reset
+config.pad = pad;
+config = rmfield( config, 'Fs' );
+
+% Close the file
+status = fclose( fid ); if status == -1, error( 'fTransform:: Error closing file ...' ); end
+
+
+
+
+
+
+%%%%%%%%% Supporting Functions %%%%%%%%%%%%%%%%%%%%%%
+
+function [J,f]=mtftc(data,params)
+% Multi-taper Fourier Transform - continuous process
+%
+% Adapted from mtspectrumc
+%
+% Usage:
+%
+% [S,f]=mtspectrumc(data,params)
+% Input: 
+% Note units have to be consistent. See chronux.m for more information.
+%       data (in form samples x channels/trials) -- required
+%       params: structure with fields tapers, pad, Fs, fpass, err, trialave
+%       -optional
+%           tapers (precalculated tapers from dpss, or in the form [NW K] e.g [3 5]) -- optional. If not 
+%                                                 specified, use [NW K]=[3 5]
+%	        pad		    (padding factor for the FFT) - optional. Defaults to 0.  
+%			      	 e.g. For N = 500, if PAD = 0, we pad the FFT 
+%			      	 to 512 points; if PAD = 2, we pad the FFT
+%			      	 to 2048 points, etc.
+%           Fs   (sampling frequency) - optional. Default 1.
+%           fpass    (frequency band to be used in the calculation in the form
+%                                   [fmin fmax])- optional. 
+%                                   Default all frequencies between 0 and Fs/2
+%           err  (error calculation [1 p] - Theoretical error bars; [2 p] - Jackknife error bars
+%                                   [0 p] or 0 - no error bars) - optional. Default 0.
+%           trialave (average over trials/channels when 1, don't average when 0) - optional. Default 0
+% Output:
+%       S       (spectrum in form frequency x channels/trials if trialave=0; in the form frequency if trialave=1)
+%       f       (frequencies)
+
+if nargin < 1; error('Need data'); end;
+if nargin < 2; params=[]; end;
+[tapers,pad,Fs,fpass,err,trialave,params]=getparams(params);
+if nargout > 2 && err(1)==0; 
+%   Cannot compute error bars with err(1)=0. Change params and run again. 
+    error('When Serr is desired, err(1) has to be non-zero.');
+end;
+
+N=size(data,1);
+nfft=2^(nextpow2(N)+pad);
+[f,findx]=getfgrid(Fs,nfft,fpass); 
+tapers=dpsschk(tapers,N,Fs); % check tapers
+J=mtfftc(data,tapers,nfft,Fs);
+J=J(findx,:,:);
+
+

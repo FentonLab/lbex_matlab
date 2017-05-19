@@ -1,0 +1,281 @@
+function [ leadfield, params ] = eegDipoleInSphere3d3( sensorLocations, dipoleLocations, params )
+%
+% Chronux:: LBEX - A Source Localization Toolbox 
+%
+% Purpose: Evaluate the eeg leadfield matrix. 
+% Model: Dipole within a sphere 
+%
+% Caution: It is assumed that the sensor & dipole locations are input
+% relative to a coordinate system located at the center of the sphere. 
+%
+% Inputs:
+% 
+%   sensorLocations = The Cartesian coordinates of the sensor locations.
+%   sensorLocations( m, k ); m = 1, ..., nSensors; k = 1,2,3 are the
+%   Cartesian components. 
+%
+%   dipoleLocations = The Cartesian coordinates of the dipole locations.
+%   dipoleLocations( m, k ); m = 1, ..., nDipoles; k = 1,2,3 are the
+%   Cartesian components. It is assumed (and not checked - to be done) that
+%   the dipole locations are well within the scalp radius, r(1).
+%
+%   params.getEEGHeadModel.X where X as below (passed onto getEEGHeadModel.m):
+%
+%   .radius(i), i=1,2,...,4. i=1 a must, rest optional. The radii of the regions delineating 
+%   different conductivities. It must be ordered starting with the scalp radius,
+%   radius(1), and descend towards the center. The radii should not be
+%   normalized by the scalp radius (or any other). It is NOT necessary to
+%   specify all the radii, but scalp radius, radius(1), must be specified.
+%   If only the scalp radius is specified, a head model, *.model, must be
+%   specified (see *.model below). Note, either, only scalp radius, or ALL
+%   four radii must be specified; no partial specifications allowed. 
+%
+%   .conductivity(i), i=1,2...,4. i=1 a must, rest optional. The head 
+%   model layer conductivities. They must be ordered starting with the
+%   scalp conductivity, c(1), and descend towards the center. The 
+%   conductivities should not be normalized by 
+%   the scalp conductivity (or any other). It is NOT necessary to specify
+%   all the conductivities, but scalp conductivities, c(1), must be specified.
+%   If only the scalp conductivity is specified, a head model, *.model, must be
+%   specified (see *.model below). Note, either, only scalp conductivity, or ALL
+%   four conductivities must be specified; no partial specifications allowed. 
+%
+%   .model.conductivity = 'rush-driscoll' or 'cuffin-cohen' or 'stok' or 'user'
+%   If the .model field is not found, a user specified model is assumed 
+%   internally.
+%
+%   .model.radii = 'rush-driscoll' or 'cuffin-cohen' or 'stok' or 'user'
+%   If the .model field is not found, a user specified model is assumed 
+%   internally.
+%
+%
+%
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Optional Input Parameters:
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%   params.displayMsg = 0/1. Optional. Default = 0 = Don't display. 
+%
+%
+%%%%%%%%%%
+% Outputs:
+%%%%%%%%%%
+%
+%   leadfields = Matrix of leadfield calculations. leadfields( i, j ); 
+%   Storage scheme is: 
+%   m = 1, ..., nDipole; n = 1, ..., nSensors; 
+%   i = p + 3*(m-1); j = n;
+%   p = 1,2,3.
+%
+% Note:
+%   1. The { 1+3*(m-1), 2+3*(m-1), 3+3*(m-1) } rows of 
+%      the leadfield corresponds to the scalp potential distribution 
+%      (ie sensor distribution) due to an orthogonal dipole  
+%      oriented along = Cartesian {1,2,3}, at the nth voxel. 
+%      
+%   2. Units & Output Interpretations: 
+%   .radius(1) & .conductivity(1) are to be seen as dimensioned units. 
+%   The output should be interpreted carefully. If length unit in meters,
+%   conductivity in 1/(ohm-meter), the unit dipole can be interepreted as
+%   ampere-meter and potential (leadfield) as volts(V) (or alternatively, the
+%   unit-dipole as mA-meter and potential (leadfield) as mV, here m=milli).
+%   If the units of length are in centimeter (cm), for the example above, the
+%   unit-dipole will be either A-cm or mA-cm, potential (leadfield) remains
+%   the same. This core interpretation stems from the constant term
+%   multiplier in the formulae: 
+% 
+%   m / ( 4 * pi * conductivity(1) * radius(1)^2 ) 
+% 
+%   where m = current dipole moment, and for leadfield calculations set to
+%   one. 
+
+%
+% Hard-coded parameters, upfront for clarity & convenience
+%
+seriesCutOff = 3; % N in paper
+tailApproxDegree = 3; % This is actually K=3 in paper... 0-indexing issue
+nMax = 300; % Represents infinity (upper summation index) in paper
+t0Tolerance = 1e-15; % Used to evalute if dipole & sensor locations are collinear
+sphCenterTol = 0.01; % In percentage (of scalpRadius), to determine if dipole in sphere center
+
+rName = 'eegDipoleInSphere3d3:: ';
+spc   = '    ';
+checkInputs( spc, params, sensorLocations, dipoleLocations  )
+% 
+% to reduce verbosity...
+%
+hdm = params.eegHeadModel;
+
+dm = 0; if isfield( hdm, 'displayMsg' ), dm = hdm.displayMsg; end
+
+%
+% These MUST be hard-coded. User can't changes these!!
+% The reason is that L(*) & M(*) below are coded for 1-4 (see paper)
+%
+hdm.seriesCutOff = seriesCutOff;
+hdm.tailApproxDegree = tailApproxDegree; % This is actually K=3... 0-indexing issue
+scalpRadius = hdm.radius(1); % has to be present.
+scalpConductivity = hdm.conductivity( 1 ); % has to be present.
+
+% 
+% Get the 4-shell head model  
+% 
+hdm.nMax = nMax;
+hdm = getEEGHeadModel( hdm );
+an = hdm.an;
+
+%
+% Get coefficients, cn: the first few series expansion coeffs.
+%
+hdm.nMax = seriesCutOff;
+[ cn, junk ] = cnCoefficients( hdm );
+clear junk; 
+
+%
+% Modified cn = tilde{ cn }
+%
+ns = [ 1 : hdm.seriesCutOff ]' ;
+cnt = cn - ( an(1) + ns.*( an(2) + ns.*( an(3) + ns.*an(4) ) ) ); % nDipoles x 1
+clear ns;
+
+%
+% constant multiplier: 1 / (4 * pi * conductivity(1) * R^2)
+% In paper it's sigma(4), but reverse of our indexing. It's the scalp
+% conductivity. This term leads to determination & interpretation of units,
+% see notes above. 
+%
+const = 1 / ( 4*pi*scalpConductivity*scalpRadius*scalpRadius);	
+cnt = const * cnt; cn = const*cn; an = const*an;
+
+% 
+% Currently, simply project all the EEG sensors onto the scalp sphere. 
+% To be thought through & changed...
+%
+sensorLocations = eegSensorLayoutCheck( sensorLocations, scalpRadius ); 
+
+if dm, disp( rName ); end
+%
+% Determine if any of the dipoles close to sphere center
+% If so, extract those locations and handle separately
+%
+tolerance = sphCenterTol * scalpRadius;
+% Assume coords reported relative to sphere center...issue to be fixed?
+rd2 = sum( dipoleLocations .* dipoleLocations, 2 );  % nDipoles x 1
+inc = find( rd2 > tolerance*tolerance ); 
+% Transpose the indices or else indexing will be all wrong
+inc=inc'; dIndx = [1+3*(inc-1); 2+3*(inc-1); 3+3*(inc-1)]; dIndx = dIndx(:);
+
+nwDipoleLocations = dipoleLocations( inc, : );
+nwrd2 = rd2( inc );
+nSensors = size( sensorLocations, 1 );  nDipoles = size( nwDipoleLocations, 1 );
+rd = sqrt( nwrd2 );  % nDipoles x 1
+r0 = nwDipoleLocations ./ repmat( rd, 1, 3 ); % unit radial, nDipoles x 3
+f = rd / scalpRadius; % nDipoles x 1
+
+% s0 = unit vec in sensor direction
+s0 = sensorLocations ./ repmat( sqrt( sum( sensorLocations.*sensorLocations, 2 ) ), 1, 3 ); % nSensor x 1
+
+rs=zeros(nDipoles,1); rds=zeros(nDipoles,1); t0=zeros(nDipoles,3); tmp = zeros( nDipoles,1); 
+iZeros=zeros(nDipoles,1); x=zeros(nDipoles,1); 
+x2=zeros(nDipoles,1); xmf=zeros(nDipoles,1); r2i=zeros(nDipoles,1); ri=zeros(nDipoles,1); 
+aL=zeros(nDipoles, 1); aM=zeros(nDipoles,1); 
+p0=zeros(nDipoles,hdm.seriesCutOff); p1=zeros(nDipoles,hdm.seriesCutOff);
+tmp2 = zeros( nDipoles,1); 
+leadfield = zeros( 3*size(dipoleLocations,1), nSensors ); % Don't change this!!
+
+for ns = 1 : nSensors
+    rds = sum( nwDipoleLocations .* repmat( sensorLocations(ns, :), nDipoles, 1 ), 2 );  % nDipoles x 1
+    t0 = ( repmat( sensorLocations(ns, :), nDipoles, 1 ).*repmat( nwrd2, 1, 3 ) )...
+         - ( nwDipoleLocations .* repmat( rds, 1, 3 ) );
+    %
+    % t0 = unit tangent can approach zero when s0 (sensor point) & r0 (dipole location) are collinear
+    % for such cases simply set t0 = 0 (or rather as below, keep unchanged
+    % since it's magnitude is smaller than the specified tolerance.
+    %
+    % NOTE: This, the find-function, is the time consuming line in the
+    % routine. Otherwise the routine is roughly 4x faster.
+    %
+    tmp = sqrt( sum( t0.*t0, 2 ) );
+    iZeros = find( tmp > t0Tolerance );     
+    t0( iZeros, : ) = t0(iZeros,:) ./ repmat( tmp(iZeros), 1, 3 ); % Unit tangent vector % nDipoles x 3
+
+    x = sum( r0 .* repmat( s0(ns,:), nDipoles, 1), 2 ); % cosine( theta ); size = nDipoles x 1
+    %x = abs(sum( r0 .* repmat( s0(ns,:), nDipoles, 1), 2 )); % cosine( theta ); size = nDipoles x 1
+    x2 = x.*x; % nDipoles x 1
+    xmf = x - f; 
+    r2i = 1 ./ ( 1 - f.*( x + xmf ) ); % nDipoles x 1
+    ri = sqrt( r2i);
+    
+    %
+    % L(0), L(1), ..., L(3)
+    % M(0), M(1), ..., M(3)
+    %
+    % Below, we direct sum a(n)*L(n) & a(n)*M(n) type terms, with Horner
+    % type rule (polynomials in powers of 1/r^2)
+    %
+    tmp = an(4)*r2i;
+    aL = ( x + f.*( (5*x2-4) + f.*( x.*(x2-9) + f.*( (10 - x2 - x2) - f.*( x + f ) ) ) ) ) .* tmp; % a(3)*L(3)
+    aL = ( an(3)*( x.*( 1 + x.*f ) - f.*( 2 - f.*xmf ) ) + aL ).* r2i; % a(2)*L(2)
+    aL = ( an(2)*xmf + aL ) .* r2i; % a(1)*L(1)
+    aL = ( (an(1)*( 1 - 1./ri ) ./ f) + aL ) .* ri; % a(0)*L(0)
+
+    aM = ( 1 + f.*( 5*x + f.*( (x2-10) - f.*( xmf - f - f - f ) ) ) ) .* tmp; % a(3)*M(3)    
+    aM = ( an(3)*( 1 + f.*( xmf - f ) ) + aM ) .* r2i; % a(2)*M(2)    
+    aM = ( an(2) + aM ) .* r2i; % a(1)*M(1)    
+    aM = ( (an(1)*(ri + 1) ./ ( ri - f.*x.*ri + 1 )) + aM ) .* ri .* sqrt( 1 - x2 ); % a(0)*M(0)
+
+    %
+    % We only need P{0,n} & P{1,n}, ie, orders m=0 & 1
+    %
+    [ p0, p1 ] = getLegendre( x, hdm.seriesCutOff ); % p0,p1: nDipoles x seriesCutOff 
+    p1 = p1 ./ repmat( [1:hdm.seriesCutOff], nDipoles, 1 ); % p1(n)/n
+    %
+    % Sum the series
+    %
+    tmp =  cnt(1)*p0(:,1) + f.*(     cnt(2)*p0(:, 2) +           cnt(3)*f.*p0(:,3) ) + aL; % nDipoles x 1
+    tmp2 = cnt(1)*p1(:,1) + f.*( 0.5*cnt(2)*p1(:, 2) + 0.3333333*cnt(3)*f.*p1(:,3) ) + aM; % nDipoles x 1
+
+    leadfield( dIndx, ns ) = ...
+        reshape( ( r0 .* repmat( tmp, 1, 3 ) + t0.*repmat( tmp2, 1, 3 ) )' , 3*nDipoles, 1 ); % 3*nDipoles x 1
+end
+
+%
+% Now handle the dipoles close to the center of the sphere
+% 
+if ~( nDipoles == size( dipoleLocations, 1 ) )
+    inc = find( rd2 <= tolerance*tolerance ); 
+    % Transpose the indices or else indexing will be all wrong
+    inc=inc'; dIndx = [1+3*(inc-1); 2+3*(inc-1); 3+3*(inc-1)]; dIndx = dIndx(:);
+    if dm, disp([spc 'Number of dipoles close to sphere center: ' num2str( length( inc ))] ); end
+    % Divide by scalp radius here so as to eventually get R^3 in denominator
+    leadfield( dIndx, : ) = cn(1)*sensorLocations' / scalpRadius;
+end
+
+% Transfer all the calculated parameters & return it
+params.eegHeadModel = hdm;
+
+if 0
+    figure; imagesc( leadfield ); colorbar('vert'); 
+    title( ['eegDipoleInSphere3d:: Leadfield Matrix'] );
+end
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Routine to check inputs 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function checkInputs( spc, params, sensorLocations, dipoleLocations )
+
+if size( sensorLocations, 2 ) ~= 3, error( [spc '3 Cartesian components of sensor locations required, ( x, y, z ) '] ); end
+if size( dipoleLocations, 2 ) ~= 3, error( [spc '3 Cartesian components of dipole locations required, ( x, y, z ) '] ); end
+
+%
+% Check head model parameters
+% - Radii & conductivity & model choice checked in getEEGHeadModel.m
+% - Parameters for an-coefficients checked in anCoefficients.m
+% - Defaults set in respective routines
+%
+if ~isfield( params, 'eegHeadModel' )
+    error( [spc 'params.eegHeadModel not found. See help in this routine' ] );
+end

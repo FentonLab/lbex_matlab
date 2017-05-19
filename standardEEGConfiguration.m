@@ -1,0 +1,61 @@
+function [stdElectrode] = standardEEGConfiguration( config )
+% This routine reads from file a list of standard EEG positions & labels. 
+% The output is a list of channel labels, and Cartesian coordinates of the
+% EEG electrode positions. It is assumed that the head model is spherical
+% and all the electrode positions are of constant magnitude, ie radius = 
+% constant = 0.1 meters. 
+%
+% What coordinate system are the sensor locations reported in? 
+% -- Sphere of radius 0.1 meters
+% -- They are Cartesian, (x,y,z)
+% -- The +z axes passes thru the top of the head, channel Cz=(0,0,0.1)
+% -- The +x axes passes thru extreme right channel T10=(0.0865,0,-0.05)
+% -- The +y axes passes thru nose-front channel FPz=(0,0.1,-0.0021)
+% Therefore in summary, +x towards right ear, +y towards nose, +z towards
+% head top. 
+
+rname = [mfilename ':: ']; 
+fprintf( 1, [rname '\n'] ); 
+if ~isfield( config, 'filename' ), error( [rname 'Input config.filename not specified...' ] ); end
+if ~isfield( config, 'dir' ), config.dir = pwd; fprintf( 1, '   Directory not specified... set as: %s\n', config.dir ); end
+if ~isfield( config, 'debug' ), config.debug=0; end
+
+% Open file for storage
+fid = 0; [ fid, message ] = fopen( [ config.dir filesep config.filename ], 'r'); 
+if fid == -1, error( rname, message ); end
+
+i=1;
+while ~feof(fid)
+    aline = strtrim( fgetl(fid) );
+    if length( aline ) && ( ~isempty( aline ) && isempty( findstr( aline, '%' ) ) )
+        breaks = isspace( aline ); ptrs = find(breaks==1); 
+        labels{i} = upper( aline(1:ptrs(1)-1) ); 
+        % Assume 1=x, 2 = y, 3 = z
+        coords(i,1) = str2num( aline( ptrs(1)+1:ptrs(2)-1 ) ); 
+        coords(i,2) = str2num( aline( ptrs(2)+1:ptrs(3)-1 ) ); 
+        coords(i,3) = str2num( aline( ptrs(3)+1:end ) ); 
+        i=i+1;
+    end
+end
+fclose(fid);
+
+% Check if these are on a sphere 
+% Careful: the input could have been in spherical coords
+if config.debug
+    tolr = 1e-4; 
+    sphRadius = 0.1; 
+    radii = sqrt(coords(:,1).^2 + coords(:,2).^2 + coords(:,3).^2);
+    %if (radii - 10).^2 > tolr  % if in centimeters
+    if (radii - sphRadius).^2 > tolr     % if in meters 
+        fprintf( 1, ['Electrodes not on sphere' '\n'] );
+    end
+end
+
+stdElectrode.labels = labels;
+stdElectrode.coords = coords;
+stdElectrode.coordsystem = 'cartesian'; 
+stdElectrode.units = 'meters'; 
+stdElectrode.dir = config.dir;
+stdElectrode.filename = config.filename;
+
+
